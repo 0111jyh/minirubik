@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include "pdb.h"
 enum {
     CUBIES = 7,
     PERMUTATIONS = 5040,
@@ -73,74 +73,24 @@ static state_t apply_move(state_t state, uint8_t move)
         state = quarter_turn(state, (uint8_t) (move / 3U));
     return state;
 }
-
-/*@ requires \valid_read(state);
-    requires \forall integer i; 0 <= i < CUBIES ==>
-      0 <= state->p[i] < CUBIES;
-    requires \forall integer i, j; 0 <= i < j < CUBIES ==>
-      state->p[i] != state->p[j];
-    requires \forall integer i; 0 <= i < CUBIES ==>
-      0 <= state->o[i] < 3;
-    assigns \nothing;
-    ensures \result < STATES;
- */
-static uint32_t rank_state(const state_t *state)
+/* 檢查方塊是否已經完全還原（位置全對且朝向全為 0） */
+static int is_solved(const state_t *state)
 {
-    uint32_t p = 0, o = 0;
-    /*@ loop invariant 0 <= i <= CUBIES;
-        loop invariant (i == 0 ==> p == 0) && (i == 1 ==> p <= 6) &&
-          (i == 2 ==> p <= 41) && (i == 3 ==> p <= 209) &&
-          (i == 4 ==> p <= 839) && (i == 5 ==> p <= 2519) &&
-          (i >= 6 ==> p <= 5039);
-        loop assigns i, p;
-        loop variant CUBIES - i;
-     */
     for (uint8_t i = 0; i < CUBIES; ++i) {
-        uint8_t smaller = 0;
-        /*@ loop invariant i + 1 <= j <= CUBIES;
-            loop invariant smaller <= j - i - 1;
-            loop assigns j, smaller;
-            loop variant CUBIES - j;
-         */
-        for (uint8_t j = (uint8_t) (i + 1U); j < CUBIES; ++j)
-            if (state->p[j] < state->p[i])
-                ++smaller;
-        p = p * (CUBIES - i) + smaller;
+        if (state->p[i] != i || state->o[i] != 0)
+            return 0;
     }
-    /*@ loop invariant 0 <= i <= 6;
-        loop invariant (i == 0 ==> o == 0) && (i == 1 ==> o < 3) &&
-          (i == 2 ==> o < 9) && (i == 3 ==> o < 27) &&
-          (i == 4 ==> o < 81) && (i == 5 ==> o < 243) &&
-          (i == 6 ==> o < 729);
-        loop assigns i, o;
-        loop variant 6 - i;
-     */
-    for (uint8_t i = 0; i < 6; ++i)
-        o = o * 3U + state->o[i];
-    return p * ORIENTATIONS + o;
+    return 1;
 }
 
-/*@ requires \valid(state); requires rank < STATES; assigns *state; */
-static void unrank_state(uint32_t rank, state_t *state)
+/* 計算前 6 顆角塊的三進位朝向 index (0 ~ 728)，用來查 pdb.h */
+static uint16_t get_orient_index(const state_t *state)
 {
-    uint8_t available[CUBIES] = {0, 1, 2, 3, 4, 5, 6};
-    uint32_t p = rank / ORIENTATIONS, o = rank % ORIENTATIONS, f = 720;
-    uint8_t sum = 0;
-    for (uint8_t i = 0; i < CUBIES; ++i) {
-        uint8_t q = (uint8_t) (p / f);
-        p %= f;
-        state->p[i] = available[q];
-        for (uint8_t j = q; j + 1U < CUBIES - i; ++j)
-            available[j] = available[j + 1U];
-        if (i < 5)
-            f /= 6U - i;
+    uint16_t idx = 0;
+    for (uint8_t i = 0; i < 6; ++i) {
+        idx = (uint16_t)(idx * 3U + state->o[i]);
     }
-    for (uint8_t i = 6; i-- > 0;) {
-        state->o[i] = (uint8_t) (o % 3U);
-        sum = (uint8_t) (sum + state->o[i]);
-        o /= 3U;
-    }
-    state->o[6] = (uint8_t) ((3U - sum % 3U) % 3U);
+    return idx;
 }
 
 /*@ requires \valid_read(state);
@@ -186,68 +136,6 @@ static int valid(const state_t *state)
         sum = (uint8_t) (sum + state->o[i]);
     }
     return sum % 3U == 0;
-}
-
-static uint8_t *build_table(uint8_t *diameter)
-{
-    uint8_t *toward_solved = malloc(STATES);
-    uint32_t *queue = malloc((size_t) STATES * sizeof *queue);
-    uint16_t permutation[3][PERMUTATIONS], orientation[3][ORIENTATIONS];
-    uint32_t head = 0, tail = 1, level_end = 1;
-    state_t state;
-    if (!toward_solved || !queue) {
-        free(toward_solved);
-        free(queue);
-        return NULL;
-    }
-    for (uint16_t rank = 0; rank < PERMUTATIONS; ++rank) {
-        unrank_state((uint32_t) rank * ORIENTATIONS, &state);
-        for (uint8_t face = 0; face < 3; ++face) {
-            state_t next = quarter_turn(state, face);
-            permutation[face][rank] =
-                (uint16_t) (rank_state(&next) / ORIENTATIONS);
-        }
-    }
-    for (uint16_t rank = 0; rank < ORIENTATIONS; ++rank) {
-        unrank_state(rank, &state);
-        for (uint8_t face = 0; face < 3; ++face) {
-            state_t next = quarter_turn(state, face);
-            orientation[face][rank] =
-                (uint16_t) (rank_state(&next) % ORIENTATIONS);
-        }
-    }
-    memset(toward_solved, UINT8_MAX, STATES);
-    queue[0] = 0;
-    toward_solved[0] = 0;
-    *diameter = 0;
-    while (head < tail) {
-        if (head == level_end) {
-            level_end = tail;
-            ++*diameter;
-        }
-        uint32_t here = queue[head++];
-        uint16_t p = (uint16_t) (here / ORIENTATIONS);
-        uint16_t o = (uint16_t) (here % ORIENTATIONS);
-        for (uint8_t face = 0; face < 3; ++face) {
-            uint16_t next_p = p, next_o = o;
-            for (uint8_t turn = 0; turn < 3; ++turn) {
-                next_p = permutation[face][next_p];
-                next_o = orientation[face][next_o];
-                uint32_t there = (uint32_t) next_p * ORIENTATIONS + next_o;
-                if (toward_solved[there] == UINT8_MAX) {
-                    uint8_t move = (uint8_t) (face * 3U + turn);
-                    toward_solved[there] = inverse_move[move];
-                    queue[tail++] = there;
-                }
-            }
-        }
-    }
-    free(queue);
-    if (tail != STATES) {
-        free(toward_solved);
-        return NULL;
-    }
-    return toward_solved;
 }
 
 /*@ requires valid_read_string(input);
@@ -309,55 +197,33 @@ static int self_test(void)
         if (memcmp(&solved, &state, sizeof solved))
             return 0;
     }
-    for (uint32_t rank = 0; rank < STATES; ++rank) {
-        unrank_state(rank, &state);
-        if (!valid(&state) || rank_state(&state) != rank)
-            return 0;
-    }
     return 1;
 }
 
 int main(int argc, char **argv)
 {
     state_t state;
-    uint8_t diameter;
     if (argc == 2 && !strcmp(argv[1], "--self-test")) {
         if (!self_test()) {
             fputs("self-test failed\n", stderr);
             return 1;
         }
-        uint8_t *table = build_table(&diameter);
-        if (!table) {
-            fputs("could not build complete state table\n", stderr);
-            return 1;
-        }
-        free(table);
-        if (diameter != 11) {
-            fputs("BFS check failed\n", stderr);
-            return 1;
-        }
-        puts("3674160 states; diameter 11");
+        puts("self-test passed");
         return output_failed();
     }
+
     if (argc != 2 || !parse_state(argv[1], &state)) {
-        /* C99 5.1.2.2.1 lets argv[0] be null when argc is 0. */
         fprintf(stderr, "usage: %s PPPPPPPOOOOOOO\n",
                 argc > 0 && argv[0] ? argv[0] : "solver");
         return 2;
     }
-    uint8_t *table = build_table(&diameter);
-    if (!table) {
-        fputs("could not build complete state table\n", stderr);
-        return 1;
+
+    if (is_solved(&state)) {
+        putchar('\n');
+        return output_failed();
     }
-    const char *separator = "";
-    for (uint32_t rank = rank_state(&state); rank; rank = rank_state(&state)) {
-        uint8_t move = table[rank];
-        printf("%s%s", separator, move_names[move]);
-        separator = " ";
-        state = apply_move(state, move);
-    }
-    putchar('\n');
-    free(table);
+
+    /* 測試 PDB 角度啟發值是否能正常查表 */
+    printf("PDB orientation lower bound: %u moves\n", h_orient[get_orient_index(&state)]);
     return output_failed();
 }

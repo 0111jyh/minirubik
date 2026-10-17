@@ -177,6 +177,65 @@ static int parse_state(const char *input, state_t *state)
     return input[14] == '\0' && valid(state);
 }
 
+static uint8_t solution_path[12];
+
+/*
+ * state: 當前盤面狀態
+ * g: 當前已走步數
+ * bound: 本輪搜尋允許的最大總步數門檻
+ * last_face: 上一步轉動的面 (0: R, 1: B, 2: D, 初始給 -1)
+ */
+static int ida_search(state_t state, int g, int bound, int last_face)
+{
+    uint16_t orient_idx = get_orient_index(&state);
+    uint8_t h = h_orient[orient_idx];
+
+    /* 剪枝門檻：已走步數 + 角度最少還需步數 > 當前額度上限 */
+    if (g + h > bound)
+        return 0;
+
+    /* 檢查是否已完全還原（位置與朝向皆歸位） */
+    if (is_solved(&state))
+        return 1;
+
+    /* 嘗試三個面：0: R, 1: B, 2: D */
+    for (uint8_t face = 0; face < 3; ++face) {
+        if (face == last_face)
+            continue; /* 剪枝：連續轉同一面是無效展開 */
+
+        state_t cur = state;
+        /* 嘗試該面的三種轉動：turn 0 (90度), turn 1 (180度), turn 2 (270度/反向) */
+        for (uint8_t turn = 0; turn < 3; ++turn) {
+            cur = quarter_turn(cur, face);
+            uint8_t move = (uint8_t) (face * 3U + turn);
+            solution_path[g] = move;
+
+            if (ida_search(cur, g + 1, bound, face))
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static void solve_ida(state_t state)
+{
+    /* 起點門檻直接設定為當前朝向的最小步數，跳過不可能的深度 */
+    int bound = h_orient[get_orient_index(&state)];
+
+    while (bound <= 11) {
+        if (ida_search(state, 0, bound, -1)) {
+            const char *separator = "";
+            for (int i = 0; i < bound; ++i) {
+                printf("%s%s", separator, move_names[solution_path[i]]);
+                separator = " ";
+            }
+            putchar('\n');
+            return;
+        }
+        ++bound;
+    }
+}
+
 /* stdout is fully buffered off a terminal, so a write error surfaces at the
  * flush, not at the printf that queued the bytes. Every exit path that has
  * produced output goes through here.
@@ -223,7 +282,6 @@ int main(int argc, char **argv)
         return output_failed();
     }
 
-    /* 測試 PDB 角度啟發值是否能正常查表 */
-    printf("PDB orientation lower bound: %u moves\n", h_orient[get_orient_index(&state)]);
+    solve_ida(state);
     return output_failed();
 }
